@@ -9,6 +9,18 @@ This repository provides:
 - parameter search,
 - walk-forward calibration with constraint filters and recommended-config export.
 
+## Input Contract (All Scripts)
+
+Every executable in this repo uses the same market-data input contract:
+
+- `--exchange-segment`
+- `--symbol`
+- `--interval`
+- `--days`
+
+Data is always fetched from DhanHQ API through instrument lookup.  
+Legacy inputs like `--source`, `--security-id`, `--instrument`, `--from`, and `--to` are not used.
+
 ## What This Repo Does
 
 Given an instrument and interval, it:
@@ -25,7 +37,7 @@ Given an instrument and interval, it:
 
 This repo uses **DhanHQ only** for Indian-market data.
 
-Data loading is implemented through:
+Data loading for `runner.rb`, `scripts/optimize.rb`, and `scripts/walk_forward.rb` is implemented through:
 
 - `DhanHQ::Models::Instrument.find(exchange_segment, symbol)`
 - `instrument.intraday(from_date:, to_date:, interval:)`
@@ -34,6 +46,8 @@ via local gem repo:
 
 - default path: `~/project/trading-workspace/dhanhq-client`
 - override with `DHANHQ_CLIENT_PATH`
+
+All scripts call the same shared loader in `lib/dhan_hq_api_bars.rb`.
 
 ---
 
@@ -187,6 +201,8 @@ The JSON includes:
 - full-period metrics
 
 Use it as a persisted calibration artifact for deployment or repeatable runs.
+
+Note: JSON metadata includes resolved instrument details from DhanHQ (including `security_id`), but runtime input remains `exchange-segment + symbol`.
 
 ---
 
