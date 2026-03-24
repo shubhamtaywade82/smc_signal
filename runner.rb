@@ -102,7 +102,7 @@ results = results.select { |r| r[:signal] != "HOLD" } if options[:signals_only]
 results = results.last(options[:last]) if options[:last]
 
 # ── Print ───────────────────────────────────────────────────────────────────
-puts "\n#{"BAR"<9} #{"TIMESTAMP"<22} #{"CLOSE"<10} #{"SIGNAL"<22} #{"RSI"<8} #{"ADX"<8} #{"ATR%"<8} #{"ST_DIR"<8} #{"MODE"}"
+puts "\n#{'BAR'.ljust(9)} #{'TIMESTAMP'.ljust(22)} #{'CLOSE'.ljust(10)} #{'SIGNAL'.ljust(22)} #{'RSI'.ljust(8)} #{'ADX'.ljust(8)} #{'ATR%'.ljust(8)} #{'ST_DIR'.ljust(8)} #{'MODE'}"
 puts "-" * 120
 
 results.each do |r|
