@@ -15,6 +15,15 @@
 #   --tf-minutes 5       (default: 5, drives dynamic thresholds)
 #   --signals-only       (only print bars where signal != HOLD)
 #   --last N             (only show last N bars)
+# Load environment variables from .env if present (simple implementation)
+env_file = File.join(__dir__, ".env")
+if File.file?(env_file)
+  File.foreach(env_file) do |line|
+    next if line.strip.empty? || line.start_with?("#")
+    key, value = line.strip.split("=", 2)
+    ENV[key] ||= value
+  end
+end
 
 $LOAD_PATH.unshift File.join(__dir__, "lib")
 
