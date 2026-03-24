@@ -3,9 +3,7 @@
 
 # Usage:
 #   # From DhanHQ API:
-#   ruby runner.rb --source api --security-id 13 --segment NSE_EQ \
-#                  --instrument INDEX --interval 5 \
-#                  --from 2024-01-01 --to 2024-03-01
+#   ruby runner.rb --source api --security-id 13 --segment NSE_EQ --instrument INDEX --interval 5 --from 2024-01-01 --to 2024-03-01
 #
 #   # From saved JSON file:
 #   ruby runner.rb --source json --file ./data/nifty_5m.json
