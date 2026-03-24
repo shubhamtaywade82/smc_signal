@@ -112,6 +112,8 @@ class SuperTrendSignalGenerator
     ).calculate(bars)
 
     # ── Step 7: assemble signal per bar ───────────────────────────────────
+    open_position = nil
+
     bars.size.times.map do |i|
       bar      = bars[i]
       st       = st2_results[i]
@@ -163,12 +165,17 @@ class SuperTrendSignalGenerator
       put_dir_ok  = !@dir_confirm || di_bear
 
       # ── Final entry conditions ──────────────────────────────────────
-      call_buy = long_wick_entry  && call_rsi_ok && volatility_ok && st_bullish && adx_gate && call_dir_ok
-      put_buy  = short_wick_entry && put_rsi_ok  && volatility_ok && st_bearish && adx_gate && put_dir_ok
+      call_buy_candidate = long_wick_entry  && call_rsi_ok && volatility_ok && st_bullish && adx_gate && call_dir_ok
+      put_buy_candidate  = short_wick_entry && put_rsi_ok  && volatility_ok && st_bearish && adx_gate && put_dir_ok
 
       # ── Profit booking conditions ───────────────────────────────────
-      profit_book_call = st_flip_bear || rsi > @rsi_buy_max  || atr_declining || (@cfg[:use_adx_filter] && !adx_ok)
-      profit_book_put  = st_flip_bull || rsi < @rsi_sell_max || atr_declining || (@cfg[:use_adx_filter] && !adx_ok)
+      profit_book_call_candidate = st_flip_bear || rsi > @rsi_buy_max  || atr_declining || (@cfg[:use_adx_filter] && !adx_ok)
+      profit_book_put_candidate  = st_flip_bull || rsi < @rsi_sell_max || atr_declining || (@cfg[:use_adx_filter] && !adx_ok)
+
+      call_buy = call_buy_candidate && open_position.nil?
+      put_buy = put_buy_candidate && open_position.nil?
+      profit_book_call = profit_book_call_candidate && open_position == :calls
+      profit_book_put = profit_book_put_candidate && open_position == :puts
 
       # ── Signal ─────────────────────────────────────────────────────
       signal = if call_buy
@@ -182,6 +189,8 @@ class SuperTrendSignalGenerator
                else
                  "HOLD"
                end
+
+      open_position = next_position_state(open_position, signal)
 
       # Position sizing suggestion
       position_size = if atr_pct > vol_high_thresh
@@ -294,5 +303,18 @@ class SuperTrendSignalGenerator
 
   def build_warmup(bar, i)
     { bar_index: i, timestamp: bar[:timestamp], close: bar[:close], signal: nil, warmup: true }
+  end
+
+  def next_position_state(current_position, signal)
+    case signal
+    when "BUY CALLS"
+      :calls
+    when "BUY PUTS"
+      :puts
+    when "BOOK CALL PROFITS", "BOOK PUT PROFITS"
+      nil
+    else
+      current_position
+    end
   end
 end
