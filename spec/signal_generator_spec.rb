@@ -201,4 +201,20 @@ RSpec.describe SuperTrendSignalGenerator do
       expect(r[:st_bullish]).to be false
     end
   end
+
+  it "does not emit more call exits than call entries" do
+    results = subject.generate(synthetic_bars(150)).reject { |row| row[:warmup] }
+    call_entries = results.count { |row| row[:signal] == "BUY CALLS" }
+    call_exits = results.count { |row| row[:signal] == "BOOK CALL PROFITS" }
+
+    expect(call_exits).to be <= call_entries
+  end
+
+  it "does not emit more put exits than put entries" do
+    results = subject.generate(synthetic_bars(150, trend: :down)).reject { |row| row[:warmup] }
+    put_entries = results.count { |row| row[:signal] == "BUY PUTS" }
+    put_exits = results.count { |row| row[:signal] == "BOOK PUT PROFITS" }
+
+    expect(put_exits).to be <= put_entries
+  end
 end

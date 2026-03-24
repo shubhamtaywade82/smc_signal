@@ -8,6 +8,15 @@ require_relative "dhan_hq_api_bars"
 
 module StrategyOptimization
   INTRADAY_MINUTES_PER_DAY = 375.0
+  ENTRY_SIGNAL_TO_SIDE = {
+    "BUY CALLS" => :calls,
+    "BUY PUTS" => :puts
+  }.freeze
+
+  EXIT_SIGNAL_BY_SIDE = {
+    calls: "BOOK CALL PROFITS",
+    puts: "BOOK PUT PROFITS"
+  }.freeze
 
   PARAM_SPACE = {
     st_factor: [1.5, 1.75, 2.0, 2.25, 2.5, 2.75, 3.0],
@@ -60,33 +69,7 @@ module StrategyOptimization
   end
 
   def compute_trade_stats(results)
-    open_trade = nil
-    trades = []
-    cumulative = 0.0
-    peak = 0.0
-    max_drawdown = 0.0
-
-    results.each do |row|
-      signal = row[:signal]
-      close = row[:close].to_f
-      timestamp = row[:timestamp]
-
-      if open_trade.nil?
-        open_trade = build_entry(signal, close, timestamp)
-        next
-      end
-
-      next unless exit_signal_for(open_trade[:side]) == signal
-
-      pnl = trade_pnl(side: open_trade[:side], entry_price: open_trade[:entry_price], exit_price: close)
-      cumulative += pnl
-      peak = [peak, cumulative].max
-      max_drawdown = [max_drawdown, peak - cumulative].max
-
-      trades << open_trade.merge(exit_price: close, exit_time: timestamp, pnl: pnl)
-      open_trade = nil
-    end
-
+    trades, max_drawdown = extract_trades(results)
     gross_profit = trades.select { |trade| trade[:pnl] > 0 }.sum { |trade| trade[:pnl] }
     gross_loss = trades.select { |trade| trade[:pnl] < 0 }.sum { |trade| trade[:pnl].abs }
     trade_count = trades.length
@@ -170,25 +153,60 @@ module StrategyOptimization
   end
 
   def build_entry(signal, close, timestamp)
-    side = case signal
-           when "BUY CALLS"
-             :calls
-           when "BUY PUTS"
-             :puts
-           else
-             nil
-           end
+    side = ENTRY_SIGNAL_TO_SIDE[signal]
     return nil if side.nil?
 
     { side: side, entry_price: close, entry_time: timestamp }
   end
 
   def exit_signal_for(side)
-    side == :calls ? "BOOK CALL PROFITS" : "BOOK PUT PROFITS"
+    EXIT_SIGNAL_BY_SIDE.fetch(side)
   end
 
   def trade_pnl(side:, entry_price:, exit_price:)
     side == :calls ? (exit_price - entry_price) : (entry_price - exit_price)
+  end
+
+  def extract_trades(results)
+    open_trade = nil
+    trades = []
+    equity_curve = []
+    cumulative_pnl = 0.0
+
+    results.each do |row|
+      open_trade = build_entry(row[:signal], row[:close].to_f, row[:timestamp]) if open_trade.nil?
+      next if open_trade.nil?
+      next unless exit_signal_for(open_trade[:side]) == row[:signal]
+
+      trade = close_trade(open_trade, row)
+      trades << trade
+      cumulative_pnl += trade[:pnl]
+      equity_curve << cumulative_pnl
+      open_trade = nil
+    end
+
+    [trades, calculate_max_drawdown(equity_curve)]
+  end
+
+  def close_trade(open_trade, row)
+    pnl = trade_pnl(
+      side: open_trade[:side],
+      entry_price: open_trade[:entry_price],
+      exit_price: row[:close].to_f
+    )
+    open_trade.merge(exit_price: row[:close].to_f, exit_time: row[:timestamp], pnl: pnl)
+  end
+
+  def calculate_max_drawdown(equity_curve)
+    peak = 0.0
+    max_drawdown = 0.0
+
+    equity_curve.each do |equity|
+      peak = [peak, equity].max
+      max_drawdown = [max_drawdown, peak - equity].max
+    end
+
+    max_drawdown
   end
 
 end
