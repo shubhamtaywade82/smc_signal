@@ -8,7 +8,10 @@ require "fileutils"
 require "strategy_optimization"
 
 options = {
-  source: "api",
+  exchange_segment: "IDX_I",
+  symbol: "NIFTY",
+  interval: "1",
+  days: 60,
   tf_minutes: 1,
   trials: 200,
   seed: 42,
@@ -22,14 +25,10 @@ options = {
 
 OptionParser.new do |opts|
   opts.banner = "Usage: ruby scripts/walk_forward.rb [options]"
-  opts.on("--source SRC", "api | json | csv") { |value| options[:source] = value }
-  opts.on("--file PATH", "Path to JSON/CSV file") { |value| options[:file] = value }
-  opts.on("--security-id ID", "DhanHQ security_id") { |value| options[:security_id] = value }
-  opts.on("--segment SEG", "Exchange segment") { |value| options[:segment] = value }
-  opts.on("--instrument INS", "Instrument type") { |value| options[:instrument] = value }
+  opts.on("--exchange-segment SEG", "Exchange segment (e.g. IDX_I, NSE_EQ)") { |value| options[:exchange_segment] = value }
+  opts.on("--symbol SYMBOL", "Instrument symbol (e.g. NIFTY, RELIANCE)") { |value| options[:symbol] = value }
   opts.on("--interval INT", "Candle interval in minutes") { |value| options[:interval] = value }
-  opts.on("--from DATE", "From date YYYY-MM-DD") { |value| options[:from] = value }
-  opts.on("--to DATE", "To date YYYY-MM-DD") { |value| options[:to] = value }
+  opts.on("--days N", Integer, "How many days back from today") { |value| options[:days] = value }
   opts.on("--tf-minutes N", Integer, "Strategy timeframe minutes") { |value| options[:tf_minutes] = value }
   opts.on("--trials N", Integer, "Random parameter combinations per fold") { |value| options[:trials] = value }
   opts.on("--seed N", Integer, "Random seed") { |value| options[:seed] = value }
@@ -43,16 +42,13 @@ end.parse!
 
 StrategyOptimization.load_env!(File.expand_path("..", __dir__))
 
-bars = StrategyOptimization.load_bars(
-  source: options[:source],
-  file: options[:file],
-  security_id: options[:security_id],
-  segment: options[:segment],
-  instrument: options[:instrument],
+api_data = StrategyOptimization.load_bars(
+  exchange_segment: options[:exchange_segment],
+  symbol: options[:symbol],
   interval: options[:interval],
-  from: options[:from],
-  to: options[:to]
+  days: options[:days]
 )
+bars = api_data[:bars]
 
 abort "No bars loaded" if bars.empty?
 
@@ -147,13 +143,12 @@ recommended_payload = {
   stable_params: stable_params,
   tf_minutes: options[:tf_minutes],
   source_window: {
-    source: options[:source],
-    security_id: options[:security_id],
-    segment: options[:segment],
-    instrument: options[:instrument],
+    exchange_segment: options[:exchange_segment],
+    symbol: options[:symbol],
+    security_id: api_data[:instrument].security_id,
     interval: options[:interval],
-    from: options[:from],
-    to: options[:to]
+    from: api_data[:from_date].strftime("%Y-%m-%d"),
+    to: api_data[:to_date].strftime("%Y-%m-%d")
   },
   walk_forward: {
     folds: folds.size,
@@ -170,6 +165,8 @@ recommended_payload = {
 StrategyOptimization.write_json(recommended_json_path, recommended_payload)
 
 puts "Loaded bars: #{bars.size}"
+puts "Resolved instrument: #{api_data[:instrument].exchange_segment}:#{api_data[:instrument].security_id} #{api_data[:instrument].display_name}"
+puts "Date range: #{api_data[:from_date]} -> #{api_data[:to_date]} (#{options[:days]} days)"
 puts "Folds: #{folds.size}"
 puts "Train days: #{options[:train_days]}, Validate days: #{options[:validate_days]}"
 puts "Trials per fold: #{options[:trials]}"

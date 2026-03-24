@@ -1,20 +1,6 @@
 #!/usr/bin/env ruby
 # frozen_string_literal: true
 
-# Usage:
-#   # From DhanHQ API:
-#   ruby runner.rb --source api --security-id 13 --segment NSE_EQ --instrument INDEX --interval 5 --from 2024-01-01 --to 2024-03-01
-#
-#   # From saved JSON file:
-#   ruby runner.rb --source json --file ./data/nifty_5m.json
-#
-#   # From CSV:
-#   ruby runner.rb --source csv --file ./data/nifty_5m.csv
-#
-# Optional flags:
-#   --tf-minutes 5       (default: 5, drives dynamic thresholds)
-#   --signals-only       (only print bars where signal != HOLD)
-#   --last N             (only show last N bars)
 env_file = File.join(__dir__, ".env")
 if File.file?(env_file)
   File.foreach(env_file) do |line|
@@ -30,10 +16,13 @@ $LOAD_PATH.unshift File.join(__dir__, "lib")
 require "optparse"
 require "json"
 require "super_trend_signal_generator"
-require "dhan_hq/historical_client"
+require "dhan_hq_api_bars"
 
 DEFAULT_OPTIONS = {
-  source: "json",
+  exchange_segment: "IDX_I",
+  symbol: "NIFTY",
+  interval: "1",
+  days: 60,
   tf_minutes: 5,
   signals_only: false,
   summary_only: false,
@@ -46,14 +35,10 @@ def parse_options
 
   OptionParser.new do |opts|
     opts.banner = "Usage: ruby runner.rb [options]"
-    opts.on("--source SRC", "api | json | csv") { |v| options[:source] = v }
-    opts.on("--file PATH", "Path to JSON or CSV file") { |v| options[:file] = v }
-    opts.on("--security-id ID", "DhanHQ security_id") { |v| options[:security_id] = v }
-    opts.on("--segment SEG", "Exchange segment") { |v| options[:segment] = v }
-    opts.on("--instrument INS", "Instrument type") { |v| options[:instrument] = v }
-    opts.on("--interval INT", "Candle interval (1,5,15...)") { |v| options[:interval] = v }
-    opts.on("--from DATE", "From date YYYY-MM-DD") { |v| options[:from] = v }
-    opts.on("--to DATE", "To date YYYY-MM-DD") { |v| options[:to] = v }
+    opts.on("--exchange-segment SEG", "Exchange segment (e.g. IDX_I, NSE_EQ)") { |v| options[:exchange_segment] = v }
+    opts.on("--symbol SYMBOL", "Instrument symbol (e.g. NIFTY, RELIANCE)") { |v| options[:symbol] = v }
+    opts.on("--interval INT", "Candle interval (1,5,15,25,60)") { |v| options[:interval] = v }
+    opts.on("--days N", Integer, "How many days back from today") { |v| options[:days] = v }
     opts.on("--tf-minutes N", Integer, "Timeframe minutes") { |v| options[:tf_minutes] = v }
     opts.on("--signals-only", "Only print non-HOLD bars") { options[:signals_only] = true }
     opts.on("--summary-only", "Skip row output, print only summary") { options[:summary_only] = true }
@@ -64,50 +49,14 @@ def parse_options
   options
 end
 
-def load_bars(options)
-  case options[:source]
-  when "api"
-    validate_api_options!(options)
-    fetch_api_bars(options)
-  when "json"
-    abort "Missing --file" unless options[:file]
-
-    local_client.load_json(options[:file])
-  when "csv"
-    abort "Missing --file" unless options[:file]
-
-    local_client.load_csv(options[:file])
-  else
-    abort "Unknown source: #{options[:source]}"
-  end
-end
-
-def validate_api_options!(options)
-  %i[security_id segment instrument interval from to].each do |key|
-    abort "Missing --#{key.to_s.tr('_', '-')}" if options[key].nil?
-  end
-end
-
-def fetch_api_bars(options)
-  api_client.fetch(
-    security_id: options[:security_id],
-    exchange_segment: options[:segment],
-    instrument_type: options[:instrument],
+def load_api_bars(options)
+  loader = DhanHqApiBars.new
+  loader.fetch(
+    exchange_segment: options[:exchange_segment],
+    symbol: options[:symbol],
     interval: options[:interval],
-    from_date: options[:from],
-    to_date: options[:to]
+    days: options[:days]
   )
-end
-
-def api_client
-  DhanHQ::HistoricalClient.new(
-    access_token: ENV.fetch("DHAN_ACCESS_TOKEN") { abort "DHAN_ACCESS_TOKEN not set" },
-    client_id: ENV.fetch("DHAN_CLIENT_ID") { abort "DHAN_CLIENT_ID not set" }
-  )
-end
-
-def local_client
-  DhanHQ::HistoricalClient.new(access_token: "", client_id: "")
 end
 
 def filter_results(results, options)
@@ -173,9 +122,12 @@ def print_summary(results)
 end
 
 options = parse_options
-bars = load_bars(options)
+api_data = load_api_bars(options)
+bars = api_data[:bars]
 abort "No bars loaded" if bars.empty?
 
+puts "Resolved instrument: #{api_data[:instrument].exchange_segment}:#{api_data[:instrument].security_id} #{api_data[:instrument].display_name}"
+puts "Date range: #{api_data[:from_date]} -> #{api_data[:to_date]} (#{options[:days]} days)"
 puts "Loaded #{bars.size} bars"
 
 generator = SuperTrendSignalGenerator.new(tf_minutes: options[:tf_minutes])

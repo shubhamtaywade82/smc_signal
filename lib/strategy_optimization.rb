@@ -4,7 +4,7 @@ require "csv"
 require "json"
 require "time"
 require_relative "super_trend_signal_generator"
-require_relative "dhan_hq/historical_client"
+require_relative "dhan_hq_api_bars"
 
 module StrategyOptimization
   INTRADAY_MINUTES_PER_DAY = 375.0
@@ -34,33 +34,14 @@ module StrategyOptimization
     end
   end
 
-  def load_bars(source:, file:, security_id:, segment:, instrument:, interval:, from:, to:)
-    case source
-    when "api"
-      required = { security_id: security_id, segment: segment, instrument: instrument, interval: interval, from: from, to: to }
-      required.each do |name, value|
-        raise ArgumentError, "Missing --#{name.to_s.tr('_', '-')}" if value.nil? || value.to_s.empty?
-      end
-
-      api_client.fetch(
-        security_id: security_id,
-        exchange_segment: segment,
-        instrument_type: instrument,
-        interval: interval,
-        from_date: from,
-        to_date: to
-      )
-    when "json"
-      raise ArgumentError, "Missing --file" if file.nil? || file.empty?
-
-      local_client.load_json(file)
-    when "csv"
-      raise ArgumentError, "Missing --file" if file.nil? || file.empty?
-
-      local_client.load_csv(file)
-    else
-      raise ArgumentError, "Unknown source: #{source}"
-    end
+  def load_bars(exchange_segment:, symbol:, interval:, days:)
+    loader = DhanHqApiBars.new
+    loader.fetch(
+      exchange_segment: exchange_segment,
+      symbol: symbol,
+      interval: interval,
+      days: days
+    )
   end
 
   def sample_configs(trials:, rng:, space: PARAM_SPACE)
@@ -210,14 +191,4 @@ module StrategyOptimization
     side == :calls ? (exit_price - entry_price) : (entry_price - exit_price)
   end
 
-  def api_client
-    DhanHQ::HistoricalClient.new(
-      access_token: ENV.fetch("DHAN_ACCESS_TOKEN"),
-      client_id: ENV.fetch("DHAN_CLIENT_ID")
-    )
-  end
-
-  def local_client
-    DhanHQ::HistoricalClient.new(access_token: "", client_id: "")
-  end
 end
