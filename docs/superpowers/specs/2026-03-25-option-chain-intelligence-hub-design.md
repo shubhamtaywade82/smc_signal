@@ -23,7 +23,7 @@ This spec designs the **Option Chain Intelligence Hub**: a new `OptionChainAnaly
 | Pain point | Resolution |
 |------------|-----------|
 | A — Entry quality | Regime gate, OI wall proximity gate, PCR confirmation gate |
-| C — Market regime detection | OptionChainAnalyzer computes `:trending / :ranging / :expiry_gamma / :high_vix` |
+| C — Market regime detection | OptionChainAnalyzer computes `:trending / :ranging / :neutral / :expiry_gamma / :high_vix` |
 | D — Exit management | OI wall target, PCR reversal, Max Pain gravity exits |
 
 ---
@@ -53,6 +53,10 @@ This spec designs the **Option Chain Intelligence Hub**: a new `OptionChainAnaly
 | Max Pain strike | Spot gravitates toward it near expiry — dangerous for buyers |
 | IV skew (PE IV / CE IV) | > 1.4 = fear premium; elevated PE demand = bearish sentiment |
 
+### IV skew calculation
+
+`iv_skew = avg_pe_iv / avg_ce_iv`, where averages are taken over ATM ± 2 strikes only (i.e. the 5 strikes closest to spot). This avoids deep-OTM outliers distorting the ratio.
+
 ### Spot behaviour → strategy mapping
 
 | Spot pattern | Strategy | Best timeframe |
@@ -75,10 +79,10 @@ Single responsibility: accept an option chain hash and spot price + ADX, return 
 **Input** (same format already used by `LiveOptionSelector`):
 ```ruby
 OptionChainAnalyzer.new.analyze(
-  option_chain: chain_hash,   # { strike => { "ce" => {...}, "pe" => {...} } }
-  spot_price:   22480.0,
-  adx:          28.5,
-  days_to_expiry: 2           # 0 = expiry day
+  option_chain:   chain_hash,   # { strike => { "ce" => {...}, "pe" => {...} } }
+  spot_price:     22480.0,
+  adx:            28.5,
+  days_to_expiry: 2             # 0 = expiry day (Thursday NIFTY, Friday SENSEX)
 )
 ```
 
@@ -86,13 +90,13 @@ OptionChainAnalyzer.new.analyze(
 ```ruby
 {
   pcr:              0.92,          # total put OI / total call OI
-  max_pain:         22450,         # strike minimising aggregate OI loss
-  ce_walls:         [22500, 22600],# top-2 CE OI strikes → resistance
-  pe_walls:         [22300, 22200],# top-2 PE OI strikes → support
-  iv_skew:          1.18,          # avg PE IV / avg CE IV
+  max_pain:         22450,         # strike minimising aggregate writer loss (see formula)
+  ce_walls:         [22500, 22600],# top-2 CE OI strikes above spot → resistance
+  pe_walls:         [22300, 22200],# top-2 PE OI strikes below spot → support
+  iv_skew:          1.18,          # avg PE IV / avg CE IV (ATM ± 2 strikes only)
   regime:           :trending,     # see regime table
-  nearest_ce_wall:  22500,         # closest CE wall above spot
-  nearest_pe_wall:  22300          # closest PE wall below spot
+  nearest_ce_wall:  22500,         # closest CE wall above spot; nil if none exists
+  nearest_pe_wall:  22300          # closest PE wall below spot; nil if none exists
 }
 ```
 
@@ -101,37 +105,57 @@ OptionChainAnalyzer.new.analyze(
 | Tag | Condition |
 |-----|-----------|
 | `:trending` | ADX ≥ 25, PCR 0.70–1.30 |
+| `:neutral` | ADX ≥ 20 and ADX < 25 (transition zone) |
 | `:ranging` | ADX < 20 |
 | `:expiry_gamma` | days_to_expiry == 0 |
-| `:high_vix` | iv_skew > 1.40 OR avg option IV above configurable threshold |
+| `:high_vix` | iv_skew > `high_iv_skew_threshold` (default 1.40) OR avg ATM IV > `high_iv_threshold` |
 
-Regime priority when multiple conditions match: `:expiry_gamma` > `:high_vix` > `:trending` > `:ranging`.
+ADX in [20, 25) maps to `:neutral`, not `:ranging`. This aligns with the existing `moderate_trend_adx: 25.0` boundary in `OptionsBuyingPolicy` — ADX 22 is currently a valid trade entry and must remain so.
 
-**Max Pain calculation**:
-For each strike S, compute: sum over all strikes K of `(|S - K| × OI at K)` for CE and PE. Max Pain = strike S minimising total loss.
+Regime priority when multiple conditions match: `:expiry_gamma` > `:high_vix` > `:trending` > `:neutral` > `:ranging`.
+
+**Max Pain calculation** (correct directional writer-loss formula):
+```
+total_writer_loss(S) =
+  Σ_K [ max(0, S - K) × ce_oi_at_K ]   # CE writers lose when spot > their strike
++ Σ_K [ max(0, K - S) × pe_oi_at_K ]   # PE writers lose when spot < their strike
+
+Max Pain = strike S that minimises total_writer_loss(S)
+```
+This uses `max(0, ...)` not absolute value — CE writers are not harmed when spot is below their strike, and PE writers are not harmed when spot is above theirs.
+
+**`nearest_ce_wall` / `nearest_pe_wall` nil handling**:
+- If no CE strike with meaningful OI exists above spot → `nearest_ce_wall: nil`
+- If no PE strike with meaningful OI exists below spot → `nearest_pe_wall: nil`
+- Gate 2 in `OptionsBuyingPolicy` skips the check entirely when the relevant wall is nil.
 
 ---
 
 ### Modified: `lib/options_buying_policy.rb`
 
-`recommendation` gains an optional `chain_context:` keyword argument (nil by default — fully backward compatible).
+`recommendation` gains an optional `chain_context:` keyword argument (nil by default).
 
-When `chain_context` is present, three new gates run after the existing ADX gate:
+**Backward compatibility**: when `chain_context` is nil, all three new gates are bypassed entirely. The method behaves identically to the pre-change version. No partial gate logic runs.
+
+When `chain_context` is non-nil, three new gates run after the existing ADX gate:
 
 **Gate 1 — Regime gate**
 ```
-:trending     → allow entry at normal ADX floor (min_trend_adx)
-:expiry_gamma → allow entry (gamma scalp mode)
-:high_vix     → allow entry only if ADX ≥ strong_trend_adx (stricter floor)
+:trending     → allow at normal min_trend_adx floor
+:neutral      → allow at normal min_trend_adx floor (same as trending)
+:expiry_gamma → allow (gamma scalp mode)
+:high_vix     → allow only if ADX ≥ high_vix_min_adx (default 30.0, stricter floor)
 :ranging      → no_trade("regime is ranging — avoid buying options")
 ```
 
-**Gate 2 — OI wall proximity gate**
+**Gate 2 — OI wall proximity gate** (skipped if relevant wall is nil)
 ```
-CE trade: if (nearest_ce_wall - spot) ≤ 1 × strike_step → no_trade("spot within 1 step of CE wall")
-PE trade: if (spot - nearest_pe_wall) ≤ 1 × strike_step → no_trade("spot within 1 step of PE wall")
+CE trade: if nearest_ce_wall present AND (nearest_ce_wall - spot) ≤ 1 × strike_step
+  → no_trade("spot within 1 step of CE wall — resistance risk")
+PE trade: if nearest_pe_wall present AND (spot - nearest_pe_wall) ≤ 1 × strike_step
+  → no_trade("spot within 1 step of PE wall — support risk")
 ```
-`strike_step` defaults to 50 (NIFTY) and is configurable.
+`strike_step` defaults to 50.0 (NIFTY) and is configurable.
 
 **Gate 3 — PCR confirmation gate**
 ```
@@ -139,13 +163,15 @@ CE trade: if pcr < pcr_ce_floor (default 0.60) → no_trade("pcr extreme against
 PE trade: if pcr > pcr_pe_ceiling (default 1.40) → no_trade("pcr extreme against PE trade")
 ```
 
-**New config keys** (all override-able via policy JSON):
+**New config keys** (all override-able via policy JSON, follow existing `min_trend_adx` naming convention):
 ```ruby
 {
-  strike_step:     50.0,
-  pcr_ce_floor:    0.60,
-  pcr_pe_ceiling:  1.40,
-  high_vix_adx:    30.0   # stricter ADX floor in :high_vix regime
+  strike_step:            50.0,
+  pcr_ce_floor:           0.60,
+  pcr_pe_ceiling:         1.40,
+  high_vix_min_adx:       30.0,   # stricter ADX floor in :high_vix regime
+  high_iv_skew_threshold: 1.40,   # iv_skew above this → :high_vix regime
+  high_iv_threshold:      25.0    # avg ATM IV above this → :high_vix regime (annualised %)
 }
 ```
 
@@ -153,23 +179,43 @@ PE trade: if pcr > pcr_pe_ceiling (default 1.40) → no_trade("pcr extreme again
 
 ### Modified: `lib/options_backtester.rb`
 
-`simulate_trade` records OI walls and PCR from `chain_context` at entry time. `find_exit` checks three new conditions before the existing SL/TP/signal_flip checks.
+`simulate_trade` records OI walls, PCR, and max pain from `chain_context` at entry time. `find_exit` checks three new conditions before the existing SL/TP/signal_flip checks.
+
+**PCR sampling**: PCR is captured once at entry time from the `chain_context` snapshot. There is no per-bar PCR re-fetch during the hold period in backtesting. The `pcr_reversal` exit compares PCR-at-entry to a threshold shift — it is a static gate, not a live time-series comparison. This is a deliberate simplification: per-bar historical chain data is not available from DhanHQ's expired options API in the same snapshot shape.
+
+In live mode (`scripts/options_buy_signal.rb`), PCR at exit time can be re-evaluated if desired, but this is out of scope for this spec.
+
+**`chain_data_provider:` injectable dependency**:
+```ruby
+# Call signature — returns a chain_context hash or nil
+chain_data_provider.call(
+  signal_time:    Time,     # timestamp of the signal bar
+  security_id:    Integer,
+  exchange_segment: String
+)
+```
+Defaults to nil (no chain exits run). Injected in tests as a lambda/proc returning a synthetic `chain_context`. Production scripts pass a live fetcher.
 
 **New exit checks (per bar, in priority order)**:
 
-1. **max_pain_gravity** — expiry day only
-   If days_to_expiry == 0 AND spot is moving toward max_pain (away from trade direction) → exit at candle close.
+1. **max_pain_gravity** — expiry day only (days_to_expiry == 0)
+   Trigger: candle close moves further toward max_pain than entry close (away from trade direction).
+   Exit: at candle close. Reason: `"max_pain_gravity"`.
 
-2. **oi_wall_target** — dynamic profit target
-   CE trade: if spot ≥ nearest_ce_wall at entry → exit at candle close.
-   PE trade: if spot ≤ nearest_pe_wall at entry → exit at candle close.
+2. **oi_wall_target** — dynamic profit target (skipped if wall was nil at entry)
+   CE trade: if candle **close** ≥ `ce_wall_at_entry` → exit at candle close.
+   PE trade: if candle **close** ≤ `pe_wall_at_entry` → exit at candle close.
+   Close-based (not intrabar high/low) to be consistent with signal_flip exit behaviour.
+   Reason: `"oi_wall_target"`.
 
-3. **pcr_reversal** — regime shift warning
-   If PCR has moved > `pcr_reversal_delta` (default 0.25) against trade direction since entry → exit at candle close.
+3. **pcr_reversal** — entry-time PCR gate
+   CE trade: if `pcr_at_entry` < `pcr_ce_floor` (same threshold as entry Gate 3) — this prevents entries that slipped through on a boundary; not re-evaluated per bar. Skip if `pcr_at_entry` is nil.
+   *Note*: PCR reversal is an entry-time filter masquerading as an exit check in the backtester. True per-bar PCR reversal is out of scope.
+   Reason: `"pcr_reversal"`.
 
 **Full exit priority order**:
 ```
-1. max_pain_gravity  (expiry day)
+1. max_pain_gravity  (expiry day only)
 2. oi_wall_target
 3. pcr_reversal
 4. stop_loss
@@ -182,26 +228,55 @@ PE trade: if pcr > pcr_pe_ceiling (default 1.40) → no_trade("pcr extreme again
 ```ruby
 {
   ...,                                    # existing fields
-  chain_regime:       :trending,
+  chain_regime:       "trending",         # serialised as string (not symbol)
   pcr_at_entry:       0.92,
-  ce_wall_at_entry:   22500,
-  pe_wall_at_entry:   22300,
+  ce_wall_at_entry:   22500,              # nil if no wall existed
+  pe_wall_at_entry:   22300,              # nil if no wall existed
   max_pain_at_entry:  22450
 }
+```
+
+**New config namespace** — chain-related config lives under `config[:chain]`:
+```ruby
+DEFAULT_CONFIG = {
+  # ... existing risk / liquidity / expiry keys ...
+  chain: {
+    pcr_reversal_delta: 0.25,  # not used in backtester (static gate); reserved for future live mode
+    strike_step:        50.0
+  }
+}.freeze
+```
+
+New CLI flags map to `config[:chain]`:
+```
+--pcr-reversal-delta N   → config[:chain][:pcr_reversal_delta]
+--strike-step N          → config[:chain][:strike_step]
 ```
 
 ---
 
 ### Modified: `scripts/options_buy_signal.rb`
 
-After fetching the option chain, instantiate `OptionChainAnalyzer` and pass `chain_context` to `OptionsBuyingPolicy#recommendation`.
+Add `days_to_expiry` helper (script-level private method):
+```ruby
+def days_to_expiry(expiry_date_string)
+  return 0 if expiry_date_string.nil?
+  expiry = Date.parse(expiry_date_string.to_s)
+  today = Date.today
+  [(expiry - today).to_i, 0].max
+rescue ArgumentError
+  nil
+end
+```
+Returns 0 on expiry day, positive integer otherwise, nil on parse failure.
 
+After fetching the option chain, instantiate `OptionChainAnalyzer`:
 ```ruby
 chain_context = OptionChainAnalyzer.new.analyze(
-  option_chain:    option_chain,
-  spot_price:      latest[:close],
-  adx:             latest[:adx],
-  days_to_expiry:  days_to_expiry(expiry)
+  option_chain:   option_chain,
+  spot_price:     latest[:close],
+  adx:            latest[:adx],
+  days_to_expiry: days_to_expiry(expiry)
 )
 
 policy = OptionsBuyingPolicy.new(config: policy_config).recommendation(
@@ -212,18 +287,16 @@ policy = OptionsBuyingPolicy.new(config: policy_config).recommendation(
 )
 ```
 
-The JSON output payload gains a `chain_context:` field for inspection.
+The JSON output payload gains `chain_context` as a top-level key alongside `instrument`, `signal_context`, `policy`, and `selected_contract`. All symbol values (`:regime`) are serialised as strings via `.to_s` before JSON serialisation.
 
 ---
 
 ### Modified: `scripts/backtest_options.rb`
 
-Pass chain context into backtester. For historical backtesting, PCR/IV/OI walls are derived from the historical option chain snapshot at signal time. A `chain_data_provider:` injectable dependency (matching the existing `option_data_provider:` pattern) allows test injection.
-
-New CLI flags:
+Pass chain context into backtester via `chain_data_provider:` injectable. New CLI flags:
 ```
---pcr-reversal-delta N   PCR shift threshold for reversal exit (default 0.25)
---strike-step N          Strike interval for wall proximity gate (default 50)
+--pcr-reversal-delta N   PCR shift threshold (default 0.25, stored in config[:chain])
+--strike-step N          Strike interval (default 50, stored in config[:chain])
 ```
 
 ---
@@ -255,7 +328,7 @@ OptionsBuyingPolicy    OptionsBacktester
 | `lib/option_chain_analyzer.rb` | **New** — full analyzer |
 | `lib/options_buying_policy.rb` | Add `chain_context:` param + 3 gates |
 | `lib/options_backtester.rb` | Add chain-based exits + enriched trade record |
-| `scripts/options_buy_signal.rb` | Wire OptionChainAnalyzer → policy |
+| `scripts/options_buy_signal.rb` | Wire OptionChainAnalyzer → policy; add `days_to_expiry` helper |
 | `scripts/backtest_options.rb` | New CLI flags, wire chain context |
 | `spec/option_chain_analyzer_spec.rb` | **New** — unit tests |
 | `spec/options_buying_components_spec.rb` | Extend for new gates |
@@ -265,10 +338,10 @@ OptionsBuyingPolicy    OptionsBacktester
 
 ## Testing Strategy
 
-- `OptionChainAnalyzer`: unit tests with synthetic chain hashes — verify PCR, max pain, wall detection, regime tagging
-- `OptionsBuyingPolicy`: extend existing spec — test each new gate in isolation with injected `chain_context`
-- `OptionsBacktester`: inject mock chain data provider; test each new exit reason fires in correct priority order
-- All new gates are opt-in (nil chain_context = existing behaviour) so existing specs pass unchanged
+- `OptionChainAnalyzer`: unit tests with synthetic chain hashes — verify PCR, max pain (directional formula), wall detection, regime tagging for all five regimes including ADX [20, 25) → `:neutral`, nil wall cases
+- `OptionsBuyingPolicy`: extend existing spec — test each new gate in isolation with injected `chain_context`; test nil `chain_context` preserves original behaviour exactly
+- `OptionsBacktester`: inject mock `chain_data_provider` lambda; test each new exit reason fires in correct priority order; test nil provider leaves exit logic unchanged
+- All new gates are opt-in (nil chain_context / nil provider = existing behaviour) so all existing specs pass unchanged
 
 ---
 
@@ -276,6 +349,7 @@ OptionsBuyingPolicy    OptionsBacktester
 
 - Delta/Gamma targeting for strike selection (extends `LiveOptionSelector`)
 - IV Rank / IVR filter (requires historical IV series — separate data fetch)
+- Per-bar live PCR re-evaluation during hold period
 - Opening Range Breakout strategy mode
 - Contrarian PCR mean-reversion strategy mode
 - Multi-timeframe regime confirmation
