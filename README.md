@@ -59,6 +59,9 @@ All scripts call the same shared loader in `lib/dhan_hq_api_bars.rb`.
 - `lib/dhan_hq_api_bars.rb` — DhanHQ instrument resolution + bar loading
 - `scripts/optimize.rb` — random parameter search with constraints
 - `scripts/walk_forward.rb` — rolling train/validate calibration + JSON recommendation
+- `scripts/options_buy_signal.rb` — dry-run options contract selection from latest BUY signal
+- `scripts/calibrate_options_policy.rb` — builds options policy JSON from ExpiredOptionsData
+- `scripts/backtest_options.rb` — full options-buying backtest with trade CSV + summary JSON
 - `spec/signal_generator_spec.rb` — indicator/strategy tests
 
 ---
@@ -125,6 +128,102 @@ ruby runner.rb \
 - `--last N` print only last `N` rows
 - `--summary-only` skip row table, print summary only
 - `--no-color` disable ANSI colors
+
+---
+
+## Options Buying (Dry Run)
+
+Generate latest signal and map it to a live options contract suggestion (no order placement):
+
+```bash
+ruby scripts/options_buy_signal.rb \
+  --exchange-segment IDX_I \
+  --symbol NIFTY \
+  --interval 1 \
+  --days 5 \
+  --tf-minutes 1
+```
+
+This script:
+
+1. fetches underlying candles,
+2. computes latest strategy signal,
+3. applies options buying policy (`CALL` for `BUY CALLS`, `PUT` for `BUY PUTS`),
+4. loads nearest expiry option chain,
+5. selects a liquid contract by moneyness, spread, OI, and strike distance.
+
+Output is JSON payload for execution handoff.
+
+Use calibrated policy JSON:
+
+```bash
+ruby scripts/options_buy_signal.rb \
+  --exchange-segment IDX_I \
+  --symbol NIFTY \
+  --interval 1 \
+  --days 5 \
+  --tf-minutes 1 \
+  --policy-json tmp/optimization/options_policy_YYYYMMDD_HHMMSS.json
+```
+
+---
+
+## Calibrate Options Policy (ExpiredOptionsData)
+
+Build CE/PE moneyness preferences from expired options behavior:
+
+```bash
+ruby scripts/calibrate_options_policy.rb \
+  --exchange-segment IDX_I \
+  --symbol NIFTY \
+  --interval 1 \
+  --days 30 \
+  --expiry-flag WEEK \
+  --expiry-code 0
+```
+
+Outputs:
+
+- `tmp/optimization/options_policy_<timestamp>.json`
+
+This JSON can be passed to `scripts/options_buy_signal.rb` via `--policy-json`.
+
+---
+
+## Backtest Options Buying
+
+Run full options backtest with calibrated moneyness and liquidity filters:
+
+```bash
+ruby scripts/backtest_options.rb \
+  --exchange-segment IDX_I \
+  --symbol NIFTY \
+  --interval 1 \
+  --days 20 \
+  --tf-minutes 1 \
+  --policy-json tmp/optimization/options_policy_YYYYMMDD_HHMMSS.json \
+  --sl-pct 0.30 \
+  --tp-pct 0.60 \
+  --max-hold-bars 20 \
+  --ignore-last-signal-bars 1 \
+  --min-oi 1000 \
+  --max-spread-pct 4.0 \
+  --expiry-flag WEEK \
+  --expiry-code 1
+```
+
+Execution model:
+
+- entry on next option candle open after buy signal,
+- exit on first of SL / TP / opposite signal flip / max-hold-bars,
+- ignore last `N` signal bars (default `1`) to avoid end-of-window no-entry artifacts,
+- strike rule from calibrated policy (`ATM`/`ITM`/`OTM`),
+- entry gated by liquidity filters (`min_oi`, spread proxy cap).
+
+Outputs:
+
+- `tmp/optimization/options_trades_<timestamp>.csv`
+- `tmp/optimization/options_summary_<timestamp>.json`
 
 ---
 
